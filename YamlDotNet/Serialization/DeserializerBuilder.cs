@@ -25,6 +25,7 @@ using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 #endif
 using YamlDotNet.Core;
+using YamlDotNet.Serialization.BufferedDeserialization;
 using YamlDotNet.Serialization.NamingConventions;
 using YamlDotNet.Serialization.NodeDeserializers;
 using YamlDotNet.Serialization.NodeTypeResolvers;
@@ -91,12 +92,19 @@ namespace YamlDotNet.Serialization
                 { typeof(YamlSerializableNodeDeserializer), _ => new YamlSerializableNodeDeserializer(objectFactory.Value) },
                 { typeof(TypeConverterNodeDeserializer), _ => new TypeConverterNodeDeserializer(BuildTypeConverters()) },
                 { typeof(NullNodeDeserializer), _ => new NullNodeDeserializer() },
-                { typeof(ScalarNodeDeserializer), _ => new ScalarNodeDeserializer(attemptUnknownTypeDeserialization, typeConverter) },
-                { typeof(ArrayNodeDeserializer), _ => new ArrayNodeDeserializer() },
+                { typeof(ScalarNodeDeserializer), _ => new ScalarNodeDeserializer(attemptUnknownTypeDeserialization, typeConverter, yamlFormatter, enumNamingConvention) },
+                { typeof(ArrayNodeDeserializer), _ => new ArrayNodeDeserializer(enumNamingConvention) },
                 { typeof(DictionaryNodeDeserializer), _ => new DictionaryNodeDeserializer(objectFactory.Value, duplicateKeyChecking) },
-                { typeof(CollectionNodeDeserializer), _ => new CollectionNodeDeserializer(objectFactory.Value) },
+                { typeof(CollectionNodeDeserializer), _ => new CollectionNodeDeserializer(objectFactory.Value, enumNamingConvention) },
                 { typeof(EnumerableNodeDeserializer), _ => new EnumerableNodeDeserializer() },
-                { typeof(ObjectNodeDeserializer), _ => new ObjectNodeDeserializer(objectFactory.Value, BuildTypeInspector(), ignoreUnmatched, duplicateKeyChecking, typeConverter) }
+                {
+                    typeof(ObjectNodeDeserializer), _ => new ObjectNodeDeserializer(objectFactory.Value,
+                        BuildTypeInspector(),
+                        ignoreUnmatched,
+                        duplicateKeyChecking,
+                        typeConverter,
+                        enumNamingConvention)
+                }
             };
 
             nodeTypeResolverFactories = new LazyComponentRegistrationList<Nothing, INodeTypeResolver>
@@ -244,6 +252,28 @@ namespace YamlDotNet.Serialization
 
             nodeDeserializerFactories.Remove(nodeDeserializerType);
             return this;
+        }
+
+        /// <summary>
+        /// Registers a <see cref="TypeDiscriminatingNodeDeserializer" /> to be used by the deserializer. This internally registers
+        /// all existing <see cref="INodeDeserializer" /> as inner deserializers available to the <see cref="TypeDiscriminatingNodeDeserializer" />.
+        /// Usually you will want to call this after any other changes to the <see cref="INodeDeserializer" />s used by the deserializer.
+        /// </summary>
+        /// <param name="configureTypeDiscriminatingNodeDeserializerOptions">An action that can configure the <see cref="TypeDiscriminatingNodeDeserializer" />.</param>
+        /// <param name="maxDepth">Configures the max depth of yaml nodes that will be buffered. A value of -1 (the default) means yaml nodes of any depth will be buffered.</param>
+        /// <param name="maxLength">Configures the max number of yaml nodes that will be buffered. A value of -1 (the default) means there is no limit on the number of yaml nodes buffered.</param>
+        public DeserializerBuilder WithTypeDiscriminatingNodeDeserializer(
+            Action<ITypeDiscriminatingNodeDeserializerOptions> configureTypeDiscriminatingNodeDeserializerOptions, int maxDepth = -1, int maxLength = -1)
+        {
+            var options = new TypeDiscriminatingNodeDeserializerOptions();
+            configureTypeDiscriminatingNodeDeserializerOptions(options);
+            // We use all current NodeDeserializers as the inner deserializers for the TypeDiscriminatingNodeDeserializer,
+            // so that it can successfully deserialize anything our root deserializer can.
+            var typeDiscriminatingNodeDeserializer = new TypeDiscriminatingNodeDeserializer(nodeDeserializerFactories.BuildComponentList(), options.discriminators, maxDepth, maxLength);
+
+            // We register this before the DictionaryNodeDeserializer, as otherwise it will take precedence
+            // and cases where BaseType = object will not reach the TypeDiscriminatingNodeDeserializer
+            return WithNodeDeserializer(typeDiscriminatingNodeDeserializer, s => s.Before<DictionaryNodeDeserializer>());
         }
 
         /// <summary>
@@ -431,7 +461,8 @@ namespace YamlDotNet.Serialization
                 new NodeValueDeserializer(
                     nodeDeserializerFactories.BuildComponentList(),
                     nodeTypeResolverFactories.BuildComponentList(),
-                    typeConverter
+                    typeConverter,
+                    enumNamingConvention
                 )
             );
         }
